@@ -1,0 +1,1233 @@
+<!-- FIREBASE SDK INCLUDES (v9+ Compatibility Layer for direct Web access) -->
+<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
+
+<script>
+  // ==========================================
+  // 1. FIREBASE INITIALIZATION
+  // ==========================================
+  // Replace this config object with your actual Firebase project settings
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+    databaseURL: "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT_ID.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
+
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.database();
+
+  // COLOR SCHEME PRESETS
+  const colorThemes = {
+    red:     { primary: "#dc2626", dark: "#b91c1c", heavy: "#991b1b", light: "#fef2f2", border: "#fca5a5", name: "Red (Default)" },
+    green:   { primary: "#16a34a", dark: "#15803d", heavy: "#166534", light: "#f0fdf4", border: "#86efac", name: "Emerald Green" },
+    blue:    { primary: "#2563eb", dark: "#1d4ed8", heavy: "#1e40af", light: "#eff6ff", border: "#93c5fd", name: "Royal Blue" },
+    purple:  { primary: "#9333ea", dark: "#7e22ce", heavy: "#6b21a8", light: "#faf5ff", border: "#d8b4fe", name: "Imperial Purple" },
+    amber:   { primary: "#d97706", dark: "#b45309", heavy: "#92400e", light: "#fffbeb", border: "#fcd34d", name: "Amber Gold" },
+    teal:    { primary: "#0d9488", dark: "#0f766e", heavy: "#115e59", light: "#f0fdfa", border: "#99f6e4", name: "Teal / Cyan" },
+    indigo:  { primary: "#4f46e5", dark: "#4338ca", heavy: "#3730a3", light: "#eef2ff", border: "#a5b4fc", name: "Indigo" },
+    pink:    { primary: "#db2777", dark: "#be185d", heavy: "#9d174d", light: "#fdf2f8", border: "#fbcfe8", name: "Rose Pink" },
+    slate:   { primary: "#475569", dark: "#334155", heavy: "#1e293b", light: "#f8fafc", border: "#cbd5e1", name: "Slate Gray" },
+    navy:    { primary: "#0f172a", dark: "#020617", heavy: "#020617", light: "#f1f5f9", border: "#94a3b8", name: "Midnight Navy" }
+  };
+
+  let selectedThemeKey = 'red';
+
+  function applyTheme(key) {
+    const t = colorThemes[key] || colorThemes['red'];
+    selectedThemeKey = key;
+
+    document.documentElement.style.setProperty('--primary', t.primary);
+    document.documentElement.style.setProperty('--primary-dark', t.dark);
+    document.documentElement.style.setProperty('--primary-heavy', t.heavy);
+    document.documentElement.style.setProperty('--primary-light', t.light);
+    document.documentElement.style.setProperty('--primary-border', t.border);
+
+    db.ref('settings/theme').set(key);
+    renderColorPalette();
+    if (weeklyChartInstance) updateDashboard();
+  }
+
+  function renderColorPalette() {
+    const container = document.getElementById('colorPaletteGrid');
+    if (!container) return;
+    container.innerHTML = '';
+
+    Object.keys(colorThemes).forEach(k => {
+      const theme = colorThemes[k];
+      const isSelected = (k === selectedThemeKey);
+      
+      const btn = document.createElement('button');
+      btn.onclick = () => applyTheme(k);
+      btn.className = `p-3 rounded-xl border flex flex-col items-center gap-2 transition ${isSelected ? 'ring-2 ring-offset-2 ring-gray-800 border-transparent shadow-md' : 'hover:border-gray-400'}`;
+      btn.innerHTML = `
+        <div class="w-8 h-8 rounded-full border shadow-inner" style="background-color: ${theme.primary}"></div>
+        <span class="text-xs font-bold text-gray-700">${theme.name}</span>
+      `;
+      container.appendChild(btn);
+    });
+  }
+
+  // APPLICATION GLOBAL STATE
+  let userAccounts = {
+    manager: { username: "manager", password: "1234", role: "MANAGER" },
+    sales: { username: "sales", password: "1234", role: "SALES" }
+  };
+  let currentUser = null;
+  let inventory = [];
+  let cart = [];
+  let salesHistory = [];
+  let purchasesHistory = [];
+  let bulkPurchaseCart = [];
+  let expensesHistory = [];
+  let drugLogs = []; 
+  let weeklyChartInstance = null;
+  let currentInventoryFilterMode = 'all';
+
+  // ==========================================
+  // 2. REAL-TIME FIREBASE LISTENERS
+  // ==========================================
+  function setupRealtimeListeners() {
+    // Inventory Real-time Listener
+    db.ref('inventory').on('value', (snapshot) => {
+      const data = snapshot.val();
+      inventory = data ? Object.values(data) : [];
+      filterInventoryTable();
+      renderPosProducts();
+      populateDropdowns();
+    });
+
+    // Users Real-time Listener
+    db.ref('users').on('value', (snapshot) => {
+      const data = snapshot.val();
+      if (data) userAccounts = data;
+      if (document.getElementById('mgrUsernameInput')) {
+        document.getElementById('mgrUsernameInput').value = userAccounts.manager.username;
+        document.getElementById('salesUsernameInput').value = userAccounts.sales.username;
+      }
+    });
+
+    // Sales History Real-time Listener
+    db.ref('salesHistory').on('value', (snapshot) => {
+      const data = snapshot.val();
+      salesHistory = data ? Object.values(data).sort((a,b) => b.id - a.id) : [];
+      renderSalesTable();
+      updateDashboard();
+    });
+
+    // Purchases History Real-time Listener
+    db.ref('purchasesHistory').on('value', (snapshot) => {
+      const data = snapshot.val();
+      purchasesHistory = data ? Object.values(data).sort((a,b) => b.id - a.id) : [];
+      renderPurchasesTable();
+      updateDashboard();
+    });
+
+    // Expenses History Real-time Listener
+    db.ref('expensesHistory').on('value', (snapshot) => {
+      const data = snapshot.val();
+      expensesHistory = data ? Object.values(data).sort((a,b) => b.id - a.id) : [];
+      renderExpensesTable();
+      updateDashboard();
+    });
+
+    // Drug Logs Real-time Listener
+    db.ref('drugLogs').on('value', (snapshot) => {
+      const data = snapshot.val();
+      drugLogs = data ? Object.values(data).sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp)) : [];
+      renderDrugHistory();
+    });
+
+    // Theme Real-time Listener
+    db.ref('settings/theme').on('value', (snapshot) => {
+      const themeKey = snapshot.val();
+      if (themeKey) {
+        selectedThemeKey = themeKey;
+        const t = colorThemes[themeKey] || colorThemes['red'];
+        document.documentElement.style.setProperty('--primary', t.primary);
+        document.documentElement.style.setProperty('--primary-dark', t.dark);
+        document.documentElement.style.setProperty('--primary-heavy', t.heavy);
+        document.documentElement.style.setProperty('--primary-light', t.light);
+        document.documentElement.style.setProperty('--primary-border', t.border);
+        renderColorPalette();
+      }
+    });
+  }
+
+  // HELPER: Log Drug Activity directly to Firebase
+  function logDrugActivity(productId, activityType, qtyDelta, priceInfo, details) {
+    const logId = Date.now();
+    const logData = {
+      id: logId,
+      productId,
+      timestamp: new Date().toLocaleString(),
+      isoDate: new Date().toISOString().split('T')[0],
+      activityType,
+      qtyDelta,
+      priceInfo,
+      details,
+      user: currentUser ? currentUser.username : 'System'
+    };
+    db.ref(`drugLogs/${logId}`).set(logData);
+  }
+
+  // LOGIN & AUTH
+  function handleLogin(e) {
+    e.preventDefault();
+    const u = document.getElementById('loginUsername').value.trim().toLowerCase();
+    const p = document.getElementById('loginPassword').value.trim();
+
+    if (u === userAccounts.manager.username.toLowerCase() && p === userAccounts.manager.password) {
+      currentUser = { username: userAccounts.manager.username, role: 'MANAGER' };
+    } else if (u === userAccounts.sales.username.toLowerCase() && p === userAccounts.sales.password) {
+      currentUser = { username: userAccounts.sales.username, role: 'SALES' };
+    } else {
+      alert("Invalid Username or Password!");
+      return;
+    }
+
+    document.getElementById('loginModal').classList.add('hidden');
+    document.getElementById('appContainer').classList.remove('hidden');
+    document.getElementById('userRoleBadge').innerText = currentUser.role;
+
+    if (currentUser.role === 'SALES') {
+      document.querySelectorAll('.manager-only').forEach(el => el.classList.add('hidden'));
+    } else {
+      document.querySelectorAll('.manager-only').forEach(el => el.classList.remove('hidden'));
+    }
+
+    document.getElementById('mgrUsernameInput').value = userAccounts.manager.username;
+    document.getElementById('salesUsernameInput').value = userAccounts.sales.username;
+
+    switchTab('pos');
+    populateDropdowns();
+  }
+
+  function logout() {
+    currentUser = null;
+    document.getElementById('appContainer').classList.add('hidden');
+    document.getElementById('loginModal').classList.remove('hidden');
+  }
+
+  // TAB NAVIGATION
+  function switchTab(tabName) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+    document.querySelectorAll('.tab-btn').forEach(el => {
+      el.classList.remove('theme-border', 'theme-text');
+      el.classList.add('border-transparent', 'text-gray-600');
+    });
+
+    document.getElementById(`sec-${tabName}`).classList.remove('hidden');
+    const activeTab = document.getElementById(`tab-${tabName}`);
+    if (activeTab) {
+      activeTab.classList.add('theme-border', 'theme-text');
+      activeTab.classList.remove('border-transparent', 'text-gray-600');
+    }
+
+    if (tabName === 'dashboard') updateDashboard();
+    if (tabName === 'reports') generateReport();
+    if (tabName === 'inventory') {
+      renderInventoryTable();
+      renderDrugHistory();
+    }
+    if (tabName === 'purchases') {
+      updatePurchaseStockDisplay();
+    }
+  }
+
+  // INVENTORY SUB-TABS
+  function switchInventorySubTab(sub) {
+    document.getElementById('inv-sub-products').classList.add('hidden');
+    document.getElementById('inv-sub-history').classList.add('hidden');
+
+    document.getElementById('subtab-products').classList.replace('theme-border', 'border-transparent');
+    document.getElementById('subtab-products').classList.replace('theme-text', 'text-gray-500');
+    document.getElementById('subtab-history').classList.replace('theme-border', 'border-transparent');
+    document.getElementById('subtab-history').classList.replace('theme-text', 'text-gray-500');
+
+    document.getElementById(`inv-sub-${sub}`).classList.remove('hidden');
+    document.getElementById(`subtab-${sub}`).classList.replace('border-transparent', 'theme-border');
+    document.getElementById(`subtab-${sub}`).classList.replace('text-gray-500', 'theme-text');
+  }
+
+  // POS LOGIC
+  function renderPosProducts(items = inventory) {
+    const grid = document.getElementById('posProductGrid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    items.forEach(item => {
+      const card = document.createElement('div');
+      card.className = "bg-white p-4 rounded-xl shadow-sm border flex justify-between items-center";
+      card.innerHTML = `
+        <div>
+          <h4 class="font-bold text-gray-800">${item.name}</h4>
+          <p class="text-xs text-gray-500">Stock: ${item.stock} units</p>
+          <p class="text-sm font-bold theme-text mt-1">GH₵ ${item.price.toFixed(2)}</p>
+        </div>
+        <button onclick="addToCart(${item.id})" ${item.stock === 0 ? 'disabled' : ''} 
+          class="px-3 py-1.5 rounded-lg text-sm font-bold ${item.stock === 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'theme-bg text-white'}">
+          ${item.stock === 0 ? 'Out' : '+ Add'}
+        </button>
+      `;
+      grid.appendChild(card);
+    });
+  }
+
+  function filterPosProducts() {
+    const q = document.getElementById('posSearch').value.toLowerCase();
+    renderPosProducts(inventory.filter(i => i.name.toLowerCase().includes(q)));
+  }
+
+  function addToCart(id) {
+    const product = inventory.find(p => p.id === id);
+    const cartItem = cart.find(c => c.id === id);
+    if (cartItem) {
+      if (cartItem.qty < product.stock) cartItem.qty++;
+      else alert("Exceeds available stock!");
+    } else {
+      cart.push({ ...product, qty: 1 });
+    }
+    renderCart();
+  }
+
+  function updateCartQtyManual(id, value) {
+    const cartItem = cart.find(c => c.id === id);
+    const product = inventory.find(p => p.id === id);
+    let val = parseInt(value);
+    if (isNaN(val) || val <= 0) val = 1;
+
+    if (val > product.stock) {
+      alert("Exceeds available stock!");
+      val = product.stock;
+    }
+    cartItem.qty = val;
+    renderCart();
+  }
+
+  function updateCartQty(id, delta) {
+    const cartItem = cart.find(c => c.id === id);
+    const product = inventory.find(p => p.id === id);
+    if (cartItem) {
+      cartItem.qty += delta;
+      if (cartItem.qty > product.stock) cartItem.qty = product.stock;
+      if (cartItem.qty <= 0) cart = cart.filter(c => c.id !== id);
+    }
+    renderCart();
+  }
+
+  function clearCart() { cart = []; renderCart(); }
+
+  function renderCart() {
+    const container = document.getElementById('cartItemsList');
+    if (!container) return;
+    container.innerHTML = '';
+    let total = 0;
+    if (cart.length === 0) {
+      container.innerHTML = `<p class="text-center text-sm text-gray-400 py-8">Basket empty</p>`;
+    } else {
+      cart.forEach(item => {
+        total += item.price * item.qty;
+        const el = document.createElement('div');
+        el.className = "flex justify-between items-center bg-gray-50 p-2 rounded-lg border text-sm";
+        el.innerHTML = `
+          <div>
+            <h5 class="font-bold">${item.name}</h5>
+            <p class="text-xs text-gray-500">GH₵ ${item.price.toFixed(2)} x ${item.qty}</p>
+          </div>
+          <div class="flex items-center space-x-1">
+            <button onclick="updateCartQty(${item.id}, -1)" class="w-6 h-6 bg-gray-200 rounded font-bold">-</button>
+            <input type="number" min="1" value="${item.qty}" onchange="updateCartQtyManual(${item.id}, this.value)" class="w-12 text-center border rounded font-bold text-xs py-0.5">
+            <button onclick="updateCartQty(${item.id}, 1)" class="w-6 h-6 bg-gray-200 rounded font-bold">+</button>
+          </div>
+        `;
+        container.appendChild(el);
+      });
+    }
+    document.getElementById('cartTotal').innerText = `GH₵ ${total.toFixed(2)}`;
+  }
+
+  function checkout() {
+    if (cart.length === 0) return alert("Cart is empty!");
+    let total = 0;
+    let totalCost = 0;
+    const now = new Date();
+    const receiptIdNum = Date.now();
+    const receiptId = `REC-${receiptIdNum.toString().slice(-5)}`;
+
+    cart.forEach(item => {
+      total += item.price * item.qty;
+      totalCost += item.cost * item.qty;
+      const invItem = inventory.find(i => i.id === item.id);
+      if (invItem) {
+        const newQty = invItem.stock - item.qty;
+        db.ref(`inventory/${item.id}/stock`).set(newQty);
+        logDrugActivity(item.id, "POS Sale", `- ${item.qty}`, `GH₵ ${item.price.toFixed(2)}`, `Receipt Sale (${currentUser.role})`);
+      }
+    });
+
+    const receipt = {
+      id: receiptId,
+      numericId: receiptIdNum,
+      date: now.toLocaleString(),
+      isoDate: now.toISOString().split('T')[0],
+      dayOfWeek: now.getDay(), 
+      rawDate: now.toDateString(),
+      payment: document.getElementById('paymentMethod').value,
+      itemsCount: cart.reduce((s, c) => s + c.qty, 0),
+      items: [...cart],
+      total: total,
+      cost: totalCost,
+      userRole: currentUser.role
+    };
+
+    db.ref(`salesHistory/${receiptIdNum}`).set(receipt);
+
+    alert(`Checkout Completed!\nReceipt #: ${receipt.id}`);
+    clearCart();
+  }
+
+  // EXPIRY & REORDER BADGE CALCULATOR
+  function getDaysToExpiry(expiryStr) {
+    if (!expiryStr) return null;
+    const expDate = new Date(expiryStr);
+    const today = new Date();
+    today.setHours(0,0,0,0);
+    expDate.setHours(0,0,0,0);
+    const diffTime = expDate - today;
+    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  }
+
+  function getExpiryBadge(expiryStr) {
+    const diffDays = getDaysToExpiry(expiryStr);
+    if (diffDays === null || isNaN(diffDays)) return '<span class="text-gray-400 text-xs">N/A</span>';
+
+    if (diffDays <= 0) {
+      return `<span class="bg-red-800 text-white text-[10px] px-2 py-0.5 rounded font-bold uppercase">EXPIRED (${Math.abs(diffDays)}d ago)</span>`;
+    } else if (diffDays <= 90) {
+      return `<span class="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded font-bold uppercase"><i class="fa-solid fa-triangle-exclamation"></i> ${diffDays} Days Left</span>`;
+    } else {
+      return `<span class="bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded font-bold">${diffDays} Days Left</span>`;
+    }
+  }
+
+  // INVENTORY FILTER BUTTON TOGGLES
+  function setInventoryFilter(mode) {
+    currentInventoryFilterMode = mode;
+    
+    document.querySelectorAll('.inv-filter-btn').forEach(btn => {
+      btn.classList.remove('theme-bg', 'text-white');
+      btn.classList.add('bg-gray-200', 'text-gray-700');
+    });
+
+    const activeBtn = document.getElementById(`filter-btn-${mode}`);
+    if (activeBtn) {
+      activeBtn.classList.remove('bg-gray-200', 'text-gray-700');
+      activeBtn.classList.add('theme-bg', 'text-white');
+    }
+
+    filterInventoryTable();
+  }
+
+  // INVENTORY CONTROL RENDER & FILTER
+  function renderInventoryTable(items = inventory) {
+    const tbody = document.getElementById('inventoryTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    if (items.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" class="p-4 text-center text-gray-400">No products matching the selected criteria.</td></tr>`;
+      return;
+    }
+
+    items.forEach(item => {
+      const tr = document.createElement('tr');
+      tr.className = "border-b text-sm";
+
+      const isLowStock = item.stock <= (item.reorderLevel || 10);
+
+      tr.innerHTML = `
+        <td class="p-3">
+          <input type="text" value="${item.name}" onchange="adjustInventory(${item.id}, 'name', this.value)" class="w-full border rounded p-1 text-sm font-semibold outline-none">
+        </td>
+        <td class="p-3">
+          <input type="number" step="0.01" value="${item.cost}" onchange="adjustInventory(${item.id}, 'cost', this.value)" class="w-20 border rounded p-1 text-sm">
+        </td>
+        <td class="p-3">
+          <input type="number" step="0.01" value="${item.price}" onchange="adjustInventory(${item.id}, 'price', this.value)" class="w-20 border rounded p-1 text-sm font-bold theme-text">
+        </td>
+        <td class="p-3">
+          <div class="flex items-center gap-2">
+            <input type="number" value="${item.stock}" onchange="adjustInventory(${item.id}, 'stock', this.value)" class="w-16 border rounded p-1 text-sm font-bold">
+            ${isLowStock ? '<span class="bg-yellow-100 text-yellow-800 border border-yellow-300 text-[10px] px-1.5 py-0.5 rounded font-bold uppercase"><i class="fa-solid fa-triangle-exclamation"></i> LOW STOCK</span>' : ''}
+          </div>
+        </td>
+        <td class="p-3">
+          <input type="number" value="${item.reorderLevel || 10}" onchange="adjustInventory(${item.id}, 'reorderLevel', this.value)" class="w-16 border rounded p-1 text-sm">
+        </td>
+        <td class="p-3">
+          <input type="text" value="${item.expiryDate || ''}" placeholder="YYYY-MM-DD" onchange="adjustInventory(${item.id}, 'expiryDate', this.value)" class="border rounded p-1 text-xs w-28">
+        </td>
+        <td class="p-3">${getExpiryBadge(item.expiryDate)}</td>
+        <td class="p-3 text-center">
+          <button onclick="deleteProduct(${item.id})" class="text-red-600 hover:text-red-800"><i class="fa-solid fa-trash"></i></button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function filterInventoryTable() {
+    const searchInput = document.getElementById('inventorySearch');
+    const q = searchInput ? searchInput.value.toLowerCase() : '';
+    let list = inventory.filter(i => 
+      i.name.toLowerCase().includes(q) || 
+      i.cost.toString().includes(q) || 
+      i.price.toString().includes(q)
+    );
+
+    if (currentInventoryFilterMode === 'lowstock') {
+      list = list.filter(i => i.stock <= (i.reorderLevel || 10));
+    } else if (currentInventoryFilterMode === 'expiry') {
+      list = list.filter(i => {
+        const d = getDaysToExpiry(i.expiryDate);
+        return d !== null && d <= 90;
+      });
+    }
+
+    renderInventoryTable(list);
+  }
+
+  function adjustInventory(id, field, value) {
+    const item = inventory.find(i => i.id === id);
+    if (item) {
+      const prev = item[field];
+      let formattedVal = (field === 'name' || field === 'expiryDate') ? value : (parseFloat(value) || 0);
+
+      db.ref(`inventory/${id}/${field}`).set(formattedVal);
+      logDrugActivity(id, `Updated ${field.toUpperCase()}`, field === 'stock' ? `${formattedVal - prev}` : '0', `GH₵ ${item.price}`, `Modified ${field}`);
+    }
+  }
+
+  function openAddMedicineModal() { document.getElementById('addMedicineModal').classList.remove('hidden'); }
+  function closeAddMedicineModal() { document.getElementById('addMedicineModal').classList.add('hidden'); }
+
+  function saveNewMedicine() {
+    const name = document.getElementById('newMedName').value;
+    const cost = parseFloat(document.getElementById('newMedCost').value);
+    const price = parseFloat(document.getElementById('newMedPrice').value);
+    const stock = parseInt(document.getElementById('newMedQty').value);
+    const reorderLevel = parseInt(document.getElementById('newMedReorder').value) || 10;
+    const expiryDate = document.getElementById('newMedExpiry').value;
+
+    if (!name || isNaN(cost) || isNaN(price) || isNaN(stock)) return alert("Fill all essential fields!");
+
+    const newId = Date.now();
+    const productData = { id: newId, name, cost, price, stock, reorderLevel, expiryDate };
+
+    db.ref(`inventory/${newId}`).set(productData);
+    logDrugActivity(newId, "Product Initialized", `+ ${stock}`, `Cost: GH₵ ${cost}`, "Created product record");
+
+    closeAddMedicineModal();
+  }
+
+  function deleteProduct(id) {
+    if (confirm("Delete product from system?")) {
+      db.ref(`inventory/${id}`).remove();
+    }
+  }
+
+  // DRUG AUDIT HISTORY LOGIC
+  function populateDropdowns() {
+    const selectPurchase = document.getElementById('purchaseProduct');
+    const selectHistory = document.getElementById('historyDrugSelect');
+    if (!selectPurchase || !selectHistory) return;
+
+    selectPurchase.innerHTML = '';
+    selectHistory.innerHTML = '';
+
+    inventory.forEach(i => {
+      selectPurchase.innerHTML += `<option value="${i.id}">${i.name}</option>`;
+      selectHistory.innerHTML += `<option value="${i.id}">${i.name}</option>`;
+    });
+
+    updatePurchaseStockDisplay();
+  }
+
+  function updatePurchaseStockDisplay() {
+    const selectPurchase = document.getElementById('purchaseProduct');
+    const stockInput = document.getElementById('purchaseCurrentStock');
+    if (!selectPurchase || !stockInput) return;
+
+    const prodId = parseInt(selectPurchase.value);
+    const product = inventory.find(i => i.id === prodId);
+    if (product) {
+      stockInput.value = `${product.stock} units`;
+    } else {
+      stockInput.value = `0 units`;
+    }
+  }
+
+  function renderDrugHistory() {
+    const selectEl = document.getElementById('historyDrugSelect');
+    if (!selectEl || !selectEl.value) return;
+    const prodId = parseInt(selectEl.value);
+    const tbody = document.getElementById('drugHistoryTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    const logs = drugLogs.filter(l => l.productId === prodId);
+
+    if (logs.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-gray-400">No history available for selected medicine.</td></tr>`;
+      return;
+    }
+
+    logs.forEach(l => {
+      tbody.innerHTML += `
+        <tr class="border-b text-sm">
+          <td class="p-3 text-gray-500">${l.timestamp}</td>
+          <td class="p-3 font-bold theme-text">${l.activityType}</td>
+          <td class="p-3 font-semibold">${l.qtyDelta}</td>
+          <td class="p-3">${l.priceInfo}</td>
+          <td class="p-3 text-gray-600">${l.details} (<b>${l.user}</b>)</td>
+        </tr>
+      `;
+    });
+  }
+
+  // SUPPLIER PURCHASES (SINGLE & BULK PURCHASE LOGIC)
+  function addBulkPurchaseItem() {
+    const prodId = parseInt(document.getElementById('purchaseProduct').value);
+    const qty = parseInt(document.getElementById('purchaseQty').value);
+    const unitCost = parseFloat(document.getElementById('purchaseUnitCost').value);
+    const expiry = document.getElementById('purchaseExpiry').value;
+
+    if (!prodId || isNaN(qty) || isNaN(unitCost) || qty <= 0 || unitCost < 0) {
+      return alert("Please select a product and enter valid quantity and cost!");
+    }
+
+    const product = inventory.find(i => i.id === prodId);
+    if (!product) return;
+
+    const existingIndex = bulkPurchaseCart.findIndex(item => item.productId === prodId);
+    if (existingIndex > -1) {
+      bulkPurchaseCart[existingIndex].qty += qty;
+      bulkPurchaseCart[existingIndex].unitCost = unitCost;
+      if (expiry) bulkPurchaseCart[existingIndex].expiry = expiry;
+      bulkPurchaseCart[existingIndex].totalCost = bulkPurchaseCart[existingIndex].qty * unitCost;
+    } else {
+      bulkPurchaseCart.push({
+        productId: prodId,
+        productName: product.name,
+        qty: qty,
+        unitCost: unitCost,
+        expiry: expiry || 'N/A',
+        totalCost: qty * unitCost
+      });
+    }
+
+    renderBulkPurchaseTable();
+    document.getElementById('purchaseQty').value = '';
+    document.getElementById('purchaseUnitCost').value = '';
+    document.getElementById('purchaseExpiry').value = '';
+  }
+
+  function removeBulkPurchaseItem(index) {
+    bulkPurchaseCart.splice(index, 1);
+    renderBulkPurchaseTable();
+  }
+
+  function clearBulkPurchaseList() {
+    bulkPurchaseCart = [];
+    renderBulkPurchaseTable();
+  }
+
+  function renderBulkPurchaseTable() {
+    const container = document.getElementById('bulkPurchaseContainer');
+    const tbody = document.getElementById('bulkPurchaseTableBody');
+    const totalEl = document.getElementById('bulkTotalCost');
+
+    if (bulkPurchaseCart.length === 0) {
+      container.classList.add('hidden');
+      tbody.innerHTML = '';
+      totalEl.innerText = 'GH₵ 0.00';
+      return;
+    }
+
+    container.classList.remove('hidden');
+    tbody.innerHTML = '';
+    let grandTotal = 0;
+
+    bulkPurchaseCart.forEach((item, index) => {
+      grandTotal += item.totalCost;
+      tbody.innerHTML += `
+        <tr class="border-b bg-white">
+          <td class="p-2 font-bold">${item.productName}</td>
+          <td class="p-2">${item.qty}</td>
+          <td class="p-2">GH₵ ${item.unitCost.toFixed(2)}</td>
+          <td class="p-2 text-gray-500">${item.expiry}</td>
+          <td class="p-2 font-bold">GH₵ ${item.totalCost.toFixed(2)}</td>
+          <td class="p-2 text-center">
+            <button onclick="removeBulkPurchaseItem(${index})" class="text-red-600 hover:text-red-800"><i class="fa-solid fa-trash"></i></button>
+          </td>
+        </tr>
+      `;
+    });
+
+    totalEl.innerText = `GH₵ ${grandTotal.toFixed(2)}`;
+  }
+
+  function commitBulkPurchase() {
+    const supplier = document.getElementById('purchaseSupplier').value.trim();
+    if (!supplier) return alert("Please enter the Supplier Name first!");
+    if (bulkPurchaseCart.length === 0) return alert("Bulk purchase list is empty!");
+
+    const nowStr = new Date().toLocaleDateString();
+    const isoStr = new Date().toISOString().split('T')[0];
+
+    bulkPurchaseCart.forEach(item => {
+      const product = inventory.find(i => i.id === item.productId);
+      if (product) {
+        const updatedQty = product.stock + item.qty;
+        
+        const updates = {};
+        updates[`inventory/${item.productId}/stock`] = updatedQty;
+        updates[`inventory/${item.productId}/cost`] = item.unitCost;
+        if (item.expiry && item.expiry !== 'N/A') updates[`inventory/${item.productId}/expiryDate`] = item.expiry;
+        
+        db.ref().update(updates);
+        logDrugActivity(item.productId, "Bulk Purchase", `+ ${item.qty}`, `Unit Cost: GH₵ ${item.unitCost.toFixed(2)}`, `Supplier: ${supplier}`);
+
+        const purchaseId = Date.now() + Math.floor(Math.random() * 1000);
+        db.ref(`purchasesHistory/${purchaseId}`).set({
+          id: purchaseId,
+          date: nowStr,
+          isoDate: isoStr,
+          supplier: supplier,
+          productName: product.name,
+          qty: item.qty,
+          unitCost: item.unitCost,
+          expiryDate: item.expiry,
+          totalCost: item.totalCost
+        });
+      }
+    });
+
+    alert(`Bulk Purchase successfully recorded! (${bulkPurchaseCart.length} items added)`);
+    clearBulkPurchaseList();
+  }
+
+  function recordPurchase() {
+    const supplier = document.getElementById('purchaseSupplier').value.trim();
+    const prodId = parseInt(document.getElementById('purchaseProduct').value);
+    const qty = parseInt(document.getElementById('purchaseQty').value);
+    const unitCost = parseFloat(document.getElementById('purchaseUnitCost').value);
+    const expiry = document.getElementById('purchaseExpiry').value;
+
+    if (!supplier || !prodId || isNaN(qty) || isNaN(unitCost)) return alert("Fill all supplier purchase details!");
+
+    const product = inventory.find(i => i.id === prodId);
+    const updatedQty = product.stock + qty;
+
+    const updates = {};
+    updates[`inventory/${prodId}/stock`] = updatedQty;
+    updates[`inventory/${prodId}/cost`] = unitCost;
+    if (expiry) updates[`inventory/${prodId}/expiryDate`] = expiry;
+    
+    db.ref().update(updates);
+    logDrugActivity(prodId, "Supplier Purchase", `+ ${qty}`, `Unit Cost: GH₵ ${unitCost}`, `Supplier: ${supplier}`);
+
+    const purchaseId = Date.now();
+    db.ref(`purchasesHistory/${purchaseId}`).set({
+      id: purchaseId,
+      date: new Date().toLocaleDateString(),
+      isoDate: new Date().toISOString().split('T')[0],
+      supplier: supplier,
+      productName: product.name,
+      qty: qty,
+      unitCost: unitCost,
+      expiryDate: expiry || 'N/A',
+      totalCost: qty * unitCost
+    });
+
+    alert("Purchase logged and inventory updated!");
+  }
+
+  function deletePurchase(id) {
+    if (confirm("Delete this purchase entry?")) {
+      db.ref(`purchasesHistory/${id}`).remove();
+    }
+  }
+
+  function renderPurchasesTable() {
+    const tbody = document.getElementById('purchasesTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    purchasesHistory.forEach(p => {
+      tbody.innerHTML += `
+        <tr class="border-b text-sm">
+          <td class="p-3">${p.date}</td>
+          <td class="p-3 font-bold">${p.supplier}</td>
+          <td class="p-3 font-semibold">${p.productName}</td>
+          <td class="p-3">${p.qty}</td>
+          <td class="p-3">GH₵ ${p.unitCost.toFixed(2)}</td>
+          <td class="p-3 text-xs">${p.expiryDate}</td>
+          <td class="p-3 font-bold">GH₵ ${p.totalCost.toFixed(2)}</td>
+          <td class="p-3 text-center">
+            <button onclick="deletePurchase(${p.id})" class="text-red-600 hover:text-red-800"><i class="fa-solid fa-trash"></i></button>
+          </td>
+        </tr>
+      `;
+    });
+  }
+
+  // EXPENSES LOGIC
+  function recordExpense() {
+    const title = document.getElementById('expenseTitle').value;
+    const amount = parseFloat(document.getElementById('expenseAmount').value);
+
+    if (!title || isNaN(amount)) return alert("Enter valid expense title and amount!");
+
+    const expenseId = Date.now();
+    db.ref(`expensesHistory/${expenseId}`).set({
+      id: expenseId,
+      date: new Date().toLocaleDateString(),
+      isoDate: new Date().toISOString().split('T')[0],
+      title: title,
+      amount: amount
+    });
+
+    document.getElementById('expenseTitle').value = '';
+    document.getElementById('expenseAmount').value = '';
+  }
+
+  function deleteExpense(id) {
+    if (confirm("Delete this expense record?")) {
+      db.ref(`expensesHistory/${id}`).remove();
+    }
+  }
+
+  function renderExpensesTable() {
+    const tbody = document.getElementById('expensesTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    expensesHistory.forEach(e => {
+      tbody.innerHTML += `
+        <tr class="border-b text-sm">
+          <td class="p-3">${e.date}</td>
+          <td class="p-3 font-semibold">${e.title}</td>
+          <td class="p-3 font-bold theme-text">GH₵ ${e.amount.toFixed(2)}</td>
+          <td class="p-3 text-center">
+            <button onclick="deleteExpense(${e.id})" class="text-red-600 hover:text-red-800"><i class="fa-solid fa-trash"></i></button>
+          </td>
+        </tr>
+      `;
+    });
+  }
+
+  // DASHBOARD & ANALYTICS
+  function updateDashboard() {
+    const todayStr = new Date().toDateString();
+    
+    const todaySalesList = salesHistory.filter(s => s.rawDate === todayStr);
+    const todayRevenue = todaySalesList.reduce((s, val) => s + val.total, 0);
+    const todayCogs = todaySalesList.reduce((s, val) => s + val.cost, 0);
+    const todayProfit = todayRevenue - todayCogs;
+
+    const totalStockVal = inventory.reduce((sum, item) => sum + (item.stock * item.cost), 0);
+    const totalRevenue = salesHistory.reduce((s, val) => s + val.total, 0);
+    const totalPurchases = purchasesHistory.reduce((s, val) => s + val.totalCost, 0);
+    const totalExpenses = expensesHistory.reduce((s, val) => s + val.amount, 0);
+    
+    const netProfit = totalRevenue - totalPurchases - totalExpenses;
+
+    if (document.getElementById('statTodaySales')) document.getElementById('statTodaySales').innerText = `GH₵ ${todayRevenue.toFixed(2)}`;
+    if (document.getElementById('statTodayProfit')) document.getElementById('statTodayProfit').innerText = `GH₵ ${todayProfit.toFixed(2)}`;
+    if (document.getElementById('statStockValue')) document.getElementById('statStockValue').innerText = `GH₵ ${totalStockVal.toFixed(2)}`;
+
+    if (document.getElementById('statRevenue')) document.getElementById('statRevenue').innerText = `GH₵ ${totalRevenue.toFixed(2)}`;
+    if (document.getElementById('statPurchases')) document.getElementById('statPurchases').innerText = `GH₵ ${totalPurchases.toFixed(2)}`;
+    if (document.getElementById('statExpenses')) document.getElementById('statExpenses').innerText = `GH₵ ${totalExpenses.toFixed(2)}`;
+    
+    const netProfitEl = document.getElementById('statNetProfit');
+    if (netProfitEl) {
+      netProfitEl.innerText = `GH₵ ${netProfit.toFixed(2)}`;
+      if (netProfit >= 0) {
+        netProfitEl.className = "text-2xl font-bold text-green-600";
+      } else {
+        netProfitEl.className = "text-2xl font-bold text-red-600";
+      }
+    }
+
+    // Fast Moving Drugs Table
+    const productSalesMap = {};
+    salesHistory.forEach(receipt => {
+      receipt.items.forEach(item => {
+        if (!productSalesMap[item.name]) {
+          productSalesMap[item.name] = { qty: 0, revenue: 0 };
+        }
+        productSalesMap[item.name].qty += item.qty;
+        productSalesMap[item.name].revenue += (item.price * item.qty);
+      });
+    });
+
+    const sortedFastMoving = Object.keys(productSalesMap)
+      .map(name => ({ name, ...productSalesMap[name] }))
+      .sort((a, b) => b.qty - a.qty);
+
+    const fastTbody = document.getElementById('fastMovingTableBody');
+    if (fastTbody) {
+      fastTbody.innerHTML = '';
+      if (sortedFastMoving.length === 0) {
+        fastTbody.innerHTML = `<tr><td colspan="4" class="p-3 text-center text-gray-400">No sales recorded yet.</td></tr>`;
+      } else {
+        sortedFastMoving.forEach((prod, index) => {
+          fastTbody.innerHTML += `
+            <tr class="border-b">
+              <td class="p-2.5 font-bold theme-text">#${index + 1}</td>
+              <td class="p-2.5 font-semibold">${prod.name}</td>
+              <td class="p-2.5 font-bold">${prod.qty} units</td>
+              <td class="p-2.5">GH₵ ${prod.revenue.toFixed(2)}</td>
+            </tr>
+          `;
+        });
+      }
+    }
+
+    // Weekly Sales Bar Chart
+    const daysOfWeek = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const daysSalesData = [0, 0, 0, 0, 0, 0, 0];
+
+    salesHistory.forEach(s => {
+      let dayIdx = s.dayOfWeek - 1; 
+      if (dayIdx === -1) dayIdx = 6; 
+      if (dayIdx >= 0 && dayIdx < 7) {
+        daysSalesData[dayIdx] += s.total;
+      }
+    });
+
+    const activeColor = colorThemes[selectedThemeKey]?.primary || '#dc2626';
+
+    const chartEl = document.getElementById('weeklySalesChart');
+    if (chartEl) {
+      const ctxWeekly = chartEl.getContext('2d');
+      if (weeklyChartInstance) weeklyChartInstance.destroy();
+
+      weeklyChartInstance = new Chart(ctxWeekly, {
+        type: 'bar',
+        data: {
+          labels: daysOfWeek,
+          datasets: [{
+            label: 'Sales Revenue (GH₵)',
+            data: daysSalesData,
+            backgroundColor: activeColor,
+            borderRadius: 6
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            y: { beginAtZero: true }
+          }
+        }
+      });
+    }
+  }
+
+  // REPORTS LOGIC
+  function generateReport() {
+    const startDateVal = document.getElementById('reportStartDate').value;
+    const endDateVal = document.getElementById('reportEndDate').value;
+
+    let filteredSales = salesHistory;
+    let filteredPurchases = purchasesHistory;
+    let filteredExpenses = expensesHistory;
+
+    if (startDateVal) {
+      filteredSales = filteredSales.filter(s => s.isoDate >= startDateVal);
+      filteredPurchases = filteredPurchases.filter(p => p.isoDate >= startDateVal);
+      filteredExpenses = filteredExpenses.filter(e => e.isoDate >= startDateVal);
+    }
+    if (endDateVal) {
+      filteredSales = filteredSales.filter(s => s.isoDate <= endDateVal);
+      filteredPurchases = filteredPurchases.filter(p => p.isoDate <= endDateVal);
+      filteredExpenses = filteredExpenses.filter(e => e.isoDate <= endDateVal);
+    }
+
+    const totalRevenue = filteredSales.reduce((s, val) => s + val.total, 0);
+    const totalCogs = filteredSales.reduce((s, val) => s + val.cost, 0);
+    const grossProfit = totalRevenue - totalCogs;
+
+    const totalPurchases = filteredPurchases.reduce((s, val) => s + val.totalCost, 0);
+    const totalExpenses = filteredExpenses.reduce((s, val) => s + val.amount, 0);
+    
+    const netProfit = totalRevenue - totalPurchases - totalExpenses;
+
+    document.getElementById('rptPeriodRevenue').innerText = `GH₵ ${totalRevenue.toFixed(2)}`;
+    document.getElementById('rptPeriodCogs').innerText = `GH₵ ${totalCogs.toFixed(2)}`;
+    document.getElementById('rptPeriodGrossProfit').innerText = `GH₵ ${grossProfit.toFixed(2)}`;
+    document.getElementById('rptPeriodOrders').innerText = filteredSales.length;
+
+    document.getElementById('rptPeriodPurchases').innerText = `GH₵ ${totalPurchases.toFixed(2)}`;
+    document.getElementById('rptPeriodExpenses').innerText = `GH₵ ${totalExpenses.toFixed(2)}`;
+    document.getElementById('rptPeriodNetProfit').innerText = `GH₵ ${netProfit.toFixed(2)}`;
+
+    const totalStockVal = inventory.reduce((sum, item) => sum + (item.stock * item.cost), 0);
+    const totalUnits = inventory.reduce((sum, item) => sum + item.stock, 0);
+
+    document.getElementById('rptTotalItems').innerText = inventory.length;
+    document.getElementById('rptTotalUnits').innerText = totalUnits;
+    document.getElementById('rptStockVal').innerText = `GH₵ ${totalStockVal.toFixed(2)}`;
+  }
+
+  // USER CREDENTIALS MANAGEMENT
+  function updateManagerCredentials(e) {
+    e.preventDefault();
+    const u = document.getElementById('mgrUsernameInput').value.trim();
+    const p = document.getElementById('mgrPasswordInput').value.trim();
+
+    if (!u || !p) return alert("Username and Password cannot be empty!");
+
+    userAccounts.manager.username = u;
+    userAccounts.manager.password = p;
+    
+    db.ref('users/manager').set(userAccounts.manager);
+
+    if (currentUser.role === 'MANAGER') {
+      currentUser.username = u;
+    }
+
+    alert("Manager credentials updated successfully!");
+  }
+
+  function updateSalesCredentials(e) {
+    e.preventDefault();
+    const u = document.getElementById('salesUsernameInput').value.trim();
+    const p = document.getElementById('salesPasswordInput').value.trim();
+
+    if (!u || !p) return alert("Username and Password cannot be empty!");
+
+    userAccounts.sales.username = u;
+    userAccounts.sales.password = p;
+
+    db.ref('users/sales').set(userAccounts.sales);
+
+    alert("Salesperson credentials updated successfully!");
+  }
+
+  // EXCEL IMPORT & EXPORT LOGIC
+  function exportInventoryToExcel() {
+    const dataToExport = inventory.map(item => ({
+      "Product ID": item.id,
+      "Product Name": item.name,
+      "Cost Price (GHC)": item.cost,
+      "Selling Price (GHC)": item.price,
+      "Stock Quantity": item.stock,
+      "Reorder Level": item.reorderLevel || 10,
+      "Expiry Date": item.expiryDate || ""
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Inventory");
+
+    XLSX.writeFile(workbook, `Pharmacy_Inventory_${new Date().toISOString().split('T')[0]}.xlsx`);
+  }
+
+  function importInventoryFromExcel() {
+    const fileInput = document.getElementById('excelFileInput');
+    if (!fileInput.files.length) return alert("Please select an Excel file first!");
+
+    const file = fileInput.files[0];
+    const reader = new FileReader();
+
+    reader.onload = function(e) {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        const importedRows = XLSX.utils.sheet_to_json(worksheet);
+
+        if (importedRows.length === 0) return alert("Excel sheet appears to be empty!");
+
+        let countAdded = 0;
+        const updates = {};
+
+        importedRows.forEach(row => {
+          const name = row["Product Name"] || row["name"] || row["Name"];
+          const cost = parseFloat(row["Cost Price (GHC)"] || row["cost"] || 0);
+          const price = parseFloat(row["Selling Price (GHC)"] || row["price"] || 0);
+          const stock = parseInt(row["Stock Quantity"] || row["stock"] || 0);
+          const reorderLevel = parseInt(row["Reorder Level"] || row["reorderLevel"] || 10);
+          const expiryDate = row["Expiry Date"] || row["expiryDate"] || "";
+
+          if (name) {
+            const newId = Date.now() + Math.floor(Math.random() * 1000);
+            updates[`inventory/${newId}`] = { id: newId, name, cost, price, stock, reorderLevel, expiryDate };
+            logDrugActivity(newId, "Excel Import", `+ ${stock}`, `GH₵ ${price}`, "Imported from Excel file");
+            countAdded++;
+          }
+        });
+
+        db.ref().update(updates);
+        alert(`Successfully imported ${countAdded} products into inventory!`);
+      } catch (err) {
+        alert("Error parsing Excel file. Please ensure correct format.");
+      }
+    };
+
+    reader.readAsArrayBuffer(file);
+  }
+
+  // FULL JSON SYSTEM DATA BACKUP & RESTORE
+  function exportSystemJSON() {
+    const fullBackup = {
+      users: userAccounts,
+      inventory: inventory,
+      salesHistory: salesHistory,
+      purchasesHistory: purchasesHistory,
+      expensesHistory: expensesHistory,
+      drugLogs: drugLogs,
+      backupDate: new Date().toISOString()
+    };
+
+    const jsonStr = JSON.stringify(fullBackup, null, 2);
+    const blob = new Blob([jsonStr], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Suleman_Pharmacy_FullBackup_${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+  }
+
+  function importSystemJSON() {
+    const fileInput = document.getElementById('jsonFileInput');
+    if (!fileInput.files.length) return alert("Please select a JSON backup file!");
+
+    const file = fileInput.files[0];
+    const reader = new FileReader();
+
+    reader.onload = function(e) {
+      try {
+        const importedData = JSON.parse(e.target.result);
+        if (importedData.inventory && importedData.salesHistory) {
+          db.ref().set({
+            users: importedData.users || userAccounts,
+            inventory: importedData.inventory || {},
+            salesHistory: importedData.salesHistory || {},
+            purchasesHistory: importedData.purchasesHistory || {},
+            expensesHistory: importedData.expensesHistory || {},
+            drugLogs: importedData.drugLogs || {},
+            settings: { theme: selectedThemeKey }
+          });
+
+          alert("System backup successfully restored!");
+        } else {
+          alert("Invalid system backup format!");
+        }
+      } catch (err) {
+        alert("Failed to read JSON backup file!");
+      }
+    };
+
+    reader.readAsText(file);
+  }
+
+  // MASTER RESET DATA
+  function triggerMasterReset() {
+    const confirmCode = prompt("SECURITY WARNING:\nType 'RESET' in capital letters below to delete ALL inventory, sales, purchases, and expenses permanently!");
+    if (confirmCode === 'RESET') {
+      db.ref('inventory').remove();
+      db.ref('salesHistory').remove();
+      db.ref('purchasesHistory').remove();
+      db.ref('expensesHistory').remove();
+      db.ref('drugLogs').remove();
+
+      alert("MASTER RESET COMPLETE!\nAll drugs, sales records, purchases, and history have been cleared.");
+    } else {
+      alert("Reset cancelled. Confirmation text did not match.");
+    }
+  }
+
+  // RECEIPTS & DELETE
+  function openReceiptModal(id) {
+    const r = salesHistory.find(s => s.id === id);
+    if (!r) return;
+
+    document.getElementById('rcptId').innerText = r.id;
+    document.getElementById('rcptDate').innerText = r.date;
+    document.getElementById('rcptTotal').innerText = `GH₵ ${r.total.toFixed(2)}`;
+    document.getElementById('rcptPayment').innerText = r.payment;
+    document.getElementById('rcptRole').innerText = r.userRole;
+
+    const itemsContainer = document.getElementById('rcptItems');
+    itemsContainer.innerHTML = '';
+    r.items.forEach(item => {
+      itemsContainer.innerHTML += `
+        <div class="flex justify-between border-b pb-1">
+          <span>${item.name} (x${item.qty})</span>
+          <span class="font-semibold">GH₵ ${(item.price * item.qty).toFixed(2)}</span>
+        </div>
+      `;
+    });
+
+    document.getElementById('receiptModal').classList.remove('hidden');
+  }
+
+  function closeReceiptModal() {
+    document.getElementById('receiptModal').classList.add('hidden');
+  }
+
+  function deleteReceipt(id) {
+    if (confirm("Delete receipt and restore item stock back to inventory?")) {
+      const receipt = salesHistory.find(s => s.id === id);
+      if (receipt) {
+        receipt.items.forEach(item => {
+          const inv = inventory.find(i => i.id === item.id);
+          if (inv) {
+            db.ref(`inventory/${item.id}/stock`).set(inv.stock + item.qty);
+          }
+        });
+        db.ref(`salesHistory/${receipt.numericId || id}`).remove();
+        alert("Receipt deleted and items restored to inventory.");
+      }
+    }
+  }
+
+  function renderSalesTable() {
+    const tbody = document.getElementById('salesTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    salesHistory.forEach(s => {
+      tbody.innerHTML += `
+        <tr class="border-b text-sm">
+          <td class="p-3 font-bold theme-text">${s.id}</td>
+          <td class="p-3 text-gray-500">${s.date}</td>
+          <td class="p-3"><span class="bg-gray-100 px-2 py-1 rounded text-xs">${s.payment}</span></td>
+          <td class="p-3">${s.itemsCount} items</td>
+          <td class="p-3 font-bold">GH₵ ${s.total.toFixed(2)}</td>
+          <td class="p-3 text-center">
+            <button onclick="openReceiptModal('${s.id}')" class="theme-bg-light theme-text text-xs px-2.5 py-1 rounded font-bold">
+              <i class="fa-solid fa-eye mr-1"></i> View
+            </button>
+          </td>
+          <td class="p-3 text-center manager-only">
+            <button onclick="deleteReceipt('${s.id}')" class="text-red-600 hover:text-red-800"><i class="fa-solid fa-trash"></i></button>
+          </td>
+        </tr>
+      `;
+    });
+  }
+
+  // INITIALIZATION
+  window.onload = function() {
+    setupRealtimeListeners();
+    renderCart();
+    renderColorPalette();
+  };
+</script>
